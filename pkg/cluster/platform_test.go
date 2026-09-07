@@ -5,8 +5,10 @@ import (
 	"errors"
 	"testing"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -15,6 +17,18 @@ import (
 )
 
 var errPlatformAPI = errors.New("platform api error")
+
+func testClusterCatalogGVK() schema.GroupVersionKind {
+	return schema.GroupVersionKind{
+		Group: "olm.operatorframework.io", Version: "v1", Kind: "ClusterCatalog",
+	}
+}
+
+func testClusterExtensionGVK() schema.GroupVersionKind {
+	return schema.GroupVersionKind{
+		Group: "olm.operatorframework.io", Version: "v1", Kind: "ClusterExtension",
+	}
+}
 
 type erroringPlatformClient struct {
 	client.Reader
@@ -38,6 +52,40 @@ func (c *erroringPlatformClient) List(
 ) error {
 	if c.listErr != nil {
 		return c.listErr
+	}
+
+	return c.Reader.List(ctx, list, opts...)
+}
+
+type gvkGetErrorClient struct {
+	client.Reader
+
+	err    error
+	errGVK schema.GroupVersionKind
+}
+
+func (c *gvkGetErrorClient) Get(
+	ctx context.Context, key types.NamespacedName, obj client.Object, opts ...client.GetOption,
+) error {
+	if c.err != nil && obj.GetObjectKind().GroupVersionKind() == c.errGVK {
+		return c.err
+	}
+
+	return c.Reader.Get(ctx, key, obj, opts...)
+}
+
+type gvkListErrorClient struct {
+	client.Reader
+
+	err    error
+	errGVK schema.GroupVersionKind
+}
+
+func (c *gvkListErrorClient) List(
+	ctx context.Context, list client.ObjectList, opts ...client.ListOption,
+) error {
+	if c.err != nil && list.GetObjectKind().GroupVersionKind() == c.errGVK {
+		return c.err
 	}
 
 	return c.Reader.List(ctx, list, opts...)
@@ -75,7 +123,7 @@ func TestDetectPlatform_ExplicitType(t *testing.T) {
 	}
 }
 
-func TestDetectPlatform_AutoDetect(t *testing.T) {
+func TestDetectPlatform_AutoDetect(t *testing.T) { //nolint:funlen // Table-driven test with many cases.
 	t.Parallel()
 
 	tests := []struct {
@@ -93,11 +141,33 @@ func TestDetectPlatform_AutoDetect(t *testing.T) {
 			want: cluster.ManagedRhoai,
 		},
 		{
+			name:      "ManagedRhoai detected via ClusterCatalog",
+			namespace: "redhat-ods-operator",
+			objects: []client.Object{
+				newClusterCatalog("addon-managed-odh-catalog"),
+			},
+			want: cluster.ManagedRhoai,
+		},
+		{
 			name: "SelfManagedRhoai detected via OperatorCondition",
 			objects: []client.Object{
 				newOperatorCondition("rhods-operator.v1.2.3"),
 			},
 			want: cluster.SelfManagedRhoai,
+		},
+		{
+			name: "SelfManagedRhoai detected via ClusterExtension",
+			objects: []client.Object{
+				newClusterExtension("rhoai-ext", "rhods-operator", "redhat-ods-operator"),
+			},
+			want: cluster.SelfManagedRhoai,
+		},
+		{
+			name: "OpenDataHub when only ODH ClusterExtension exists",
+			objects: []client.Object{
+				newClusterExtension("odh-ext", "opendatahub-operator", "opendatahub-operator-system"),
+			},
+			want: cluster.OpenDataHub,
 		},
 		{
 			name:    "Fallback to OpenDataHub",
@@ -140,6 +210,132 @@ func TestDetectPlatform_DefaultNamespace(t *testing.T) {
 	}
 }
 
+func TestDetectPlatform_OLMv0Precedence(t *testing.T) {
+	t.Parallel()
+
+	objects := []client.Object{
+		newCatalogSource("addon-managed-odh-catalog", "redhat-ods-operator"),
+		newClusterCatalog("addon-managed-odh-catalog"),
+	}
+	cli := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(objects...).Build()
+
+	result, err := cluster.DetectPlatform(t.Context(), cli, "", "redhat-ods-operator")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if result != cluster.ManagedRhoai {
+		t.Errorf("DetectPlatform() = %q, want %q", result, cluster.ManagedRhoai)
+	}
+}
+
+func TestDetectPlatform_APIErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		client  client.Reader
+		name    string
+		wantErr bool
+	}{
+		{
+			name: "CatalogSource Get error propagated",
+			client: &erroringPlatformClient{
+				Reader: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build(),
+				getErr: errPlatformAPI,
+			},
+			wantErr: true,
+		},
+		{
+			name: "OperatorCondition List error propagated",
+			client: &erroringPlatformClient{
+				Reader:  fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build(),
+				listErr: errPlatformAPI,
+			},
+			wantErr: true,
+		},
+		{
+			name: "ClusterCatalog Get error propagated after CatalogSource miss",
+			client: &gvkGetErrorClient{
+				Reader: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build(),
+				err:    errPlatformAPI,
+				errGVK: testClusterCatalogGVK(),
+			},
+			wantErr: true,
+		},
+		{
+			name: "ClusterExtension List error propagated after OperatorCondition miss",
+			client: &gvkListErrorClient{
+				Reader: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build(),
+				err:    errPlatformAPI,
+				errGVK: testClusterExtensionGVK(),
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := cluster.DetectPlatform(t.Context(), tc.client, "", "redhat-ods-operator")
+			if tc.wantErr && err == nil {
+				t.Fatal("expected error, got nil")
+			}
+
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestDetectPlatform_OLMv1Absent(t *testing.T) {
+	t.Parallel()
+
+	noOLMv1 := &noOLMv1Client{
+		Reader: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build(),
+	}
+
+	result, err := cluster.DetectPlatform(t.Context(), noOLMv1, "", "redhat-ods-operator")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if result != cluster.OpenDataHub {
+		t.Errorf("DetectPlatform() = %q, want %q", result, cluster.OpenDataHub)
+	}
+}
+
+type noOLMv1Client struct {
+	client.Reader
+}
+
+func (c *noOLMv1Client) Get(
+	ctx context.Context, key types.NamespacedName, obj client.Object, opts ...client.GetOption,
+) error {
+	catalogGVK := testClusterCatalogGVK()
+	if obj.GetObjectKind().GroupVersionKind() == catalogGVK {
+		return &meta.NoKindMatchError{
+			GroupKind: schema.GroupKind{Group: catalogGVK.Group, Kind: catalogGVK.Kind},
+		}
+	}
+
+	return c.Reader.Get(ctx, key, obj, opts...)
+}
+
+func (c *noOLMv1Client) List(
+	ctx context.Context, list client.ObjectList, opts ...client.ListOption,
+) error {
+	extensionGVK := testClusterExtensionGVK()
+	if list.GetObjectKind().GroupVersionKind() == extensionGVK {
+		return &meta.NoKindMatchError{
+			GroupKind: schema.GroupKind{Group: extensionGVK.Group, Kind: extensionGVK.Kind},
+		}
+	}
+
+	return c.Reader.List(ctx, list, opts...)
+}
+
 // --- helpers ---
 
 func newCatalogSource(name, namespace string) *unstructured.Unstructured {
@@ -167,35 +363,35 @@ func newOperatorCondition(name string) *unstructured.Unstructured {
 	}
 }
 
-func TestDetectPlatform_APIErrors(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		getErr  error
-		listErr error
-		name    string
-	}{
-		{
-			name:   "CatalogSource Get error propagated",
-			getErr: errPlatformAPI,
-		},
-		{
-			name:    "OperatorCondition List error propagated",
-			listErr: errPlatformAPI,
+func newClusterCatalog(name string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "olm.operatorframework.io/v1",
+			"kind":       "ClusterCatalog",
+			"metadata": map[string]any{
+				"name": name,
+			},
 		},
 	}
+}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			baseCli := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()
-			cli := &erroringPlatformClient{Reader: baseCli, getErr: tc.getErr, listErr: tc.listErr}
-
-			_, err := cluster.DetectPlatform(t.Context(), cli, "", "redhat-ods-operator")
-			if err == nil {
-				t.Fatal("expected error, got nil")
-			}
-		})
+func newClusterExtension(name, packageName, namespace string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "olm.operatorframework.io/v1",
+			"kind":       "ClusterExtension",
+			"metadata": map[string]any{
+				"name": name,
+			},
+			"spec": map[string]any{
+				"namespace": namespace,
+				"source": map[string]any{
+					"sourceType": "Catalog",
+					"catalog": map[string]any{
+						"packageName": packageName,
+					},
+				},
+			},
+		},
 	}
 }

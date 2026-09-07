@@ -38,9 +38,6 @@ var (
 	subscriptionGVK = schema.GroupVersionKind{
 		Group: operatorFrameworkGroup, Version: "v1alpha1", Kind: "Subscription",
 	}
-	clusterExtensionGVK = schema.GroupVersionKind{
-		Group: "olm.operatorframework.io", Version: "v1", Kind: "ClusterExtension",
-	}
 	catalogSourceGVK = schema.GroupVersionKind{
 		Group: operatorFrameworkGroup, Version: "v1alpha1", Kind: "CatalogSource",
 	}
@@ -114,8 +111,7 @@ func OperatorPackageRequested(ctx context.Context, cli client.Reader, packageNam
 		return true, nil
 	}
 
-	clusterExtensionExists, clusterExtensionErr := resourceExists(
-		ctx, cli, clusterExtensionGVK, packageName, "spec", "source", "catalog", "packageName")
+	clusterExtensionExists, clusterExtensionErr := cluster.ClusterExtensionInstallsPackage(ctx, cli, packageName, "")
 	if clusterExtensionExists {
 		return true, nil
 	}
