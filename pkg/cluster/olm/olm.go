@@ -1,5 +1,5 @@
 // Package olm provides stateless detection functions for OLM (Operator
-// Lifecycle Manager) resources: operator existence, subscription queries.
+// Lifecycle Manager) resources: operator existence and installation queries.
 //
 // All functions use unstructured Kubernetes clients so that importing this
 // package does not pull in github.com/operator-framework/api. When OLM is
@@ -13,8 +13,10 @@ package olm
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -35,6 +37,9 @@ var (
 	}
 	subscriptionGVK = schema.GroupVersionKind{
 		Group: operatorFrameworkGroup, Version: "v1alpha1", Kind: "Subscription",
+	}
+	clusterExtensionGVK = schema.GroupVersionKind{
+		Group: "olm.operatorframework.io", Version: "v1", Kind: "ClusterExtension",
 	}
 	catalogSourceGVK = schema.GroupVersionKind{
 		Group: operatorFrameworkGroup, Version: "v1alpha1", Kind: "CatalogSource",
@@ -80,14 +85,61 @@ func OperatorExists(
 	return nil, ErrOperatorNotInstalled
 }
 
-// SubscriptionExists checks whether an OLM Subscription with the given
-// name exists anywhere on the cluster.
-//
-// Requires OLM. When OLM is absent, returns an error satisfying
+// SubscriptionExists checks for an OLMv0 Subscription with the given
+// metadata.name in any namespace. It does not check OLMv1 ClusterExtensions.
+// When the Subscription API is unavailable, the returned error satisfies
 // [meta.IsNoMatchError].
+//
+// Deprecated: Use OperatorPackageRequested for package-based detection across
+// OLMv0 and OLMv1. Pass the operator package name, which may differ from the
+// Subscription resource name. SubscriptionExists only checks OLMv0 Subscriptions.
 func SubscriptionExists(ctx context.Context, cli client.Reader, name string) (bool, error) {
+	return resourceExists(ctx, cli, subscriptionGVK, name, "metadata", "name")
+}
+
+// OperatorPackageRequested reports whether the given operator package is
+// requested on the cluster, by an OLMv0 Subscription (spec.name) or an OLMv1
+// ClusterExtension (spec.source.catalog.packageName). A Subscription match
+// returns immediately; otherwise, ClusterExtensions are checked. Resource names
+// are ignored. It checks resource existence only, not installation success or
+// operator readiness. A match returns true with no error, even if the other
+// API lookup failed.
+//
+// Requires OLM. An API-not-found error from either OLM version is ignored when
+// the other version's API is available. When neither API is available, the
+// returned error satisfies [meta.IsNoMatchError].
+func OperatorPackageRequested(ctx context.Context, cli client.Reader, packageName string) (bool, error) {
+	subscriptionExists, subscriptionErr := resourceExists(ctx, cli, subscriptionGVK, packageName, "spec", "name")
+	if subscriptionExists {
+		return true, nil
+	}
+
+	clusterExtensionExists, clusterExtensionErr := resourceExists(
+		ctx, cli, clusterExtensionGVK, packageName, "spec", "source", "catalog", "packageName")
+	if clusterExtensionExists {
+		return true, nil
+	}
+
+	if subscriptionErr != nil && !meta.IsNoMatchError(subscriptionErr) {
+		return false, subscriptionErr
+	}
+
+	if clusterExtensionErr != nil && !meta.IsNoMatchError(clusterExtensionErr) {
+		return false, clusterExtensionErr
+	}
+
+	if subscriptionErr == nil || clusterExtensionErr == nil {
+		return false, nil
+	}
+
+	return false, errors.Join(subscriptionErr, clusterExtensionErr)
+}
+
+func resourceExists(
+	ctx context.Context, cli client.Reader, gvk schema.GroupVersionKind, value string, fields ...string,
+) (bool, error) {
 	list := &unstructured.UnstructuredList{}
-	list.SetGroupVersionKind(subscriptionGVK)
+	list.SetGroupVersionKind(gvk)
 
 	err := cli.List(ctx, list)
 	if err != nil {
@@ -95,7 +147,12 @@ func SubscriptionExists(ctx context.Context, cli client.Reader, name string) (bo
 	}
 
 	for _, item := range list.Items {
-		if item.GetName() == name {
+		actual, found, err := unstructured.NestedString(item.Object, fields...)
+		if err != nil {
+			return false, fmt.Errorf("read %s on %s %s: %w", strings.Join(fields, "."), gvk.Kind, item.GetName(), err)
+		}
+
+		if found && actual == value {
 			return true, nil
 		}
 	}

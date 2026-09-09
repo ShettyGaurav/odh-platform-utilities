@@ -48,7 +48,8 @@ detection API is a transitional necessity and fallback mechanism.
 |---|---|---|
 | `CustomResourceDefinitionExists` | `cluster` | Any K8s |
 | `OperatorExists` | `cluster/olm` | OLM |
-| `SubscriptionExists` | `cluster/olm` | OLM |
+| `SubscriptionExists` (deprecated) | `cluster/olm` | OLMv0 |
+| `OperatorPackageRequested` | `cluster/olm` | OLMv0 or OLMv1 |
 | `GetSubscription` | `cluster/olm` | OLM |
 | `CatalogSourceExists` | `cluster/olm` | OLM |
 
@@ -63,7 +64,7 @@ pkg/cluster/
 ├── openshift/
 │   └── openshift.go  # GetVersion, IsSingleNodeCluster, GetAuthenticationMode, etc.
 └── olm/
-    └── olm.go        # OperatorExists, SubscriptionExists, GetSubscription, etc.
+    └── olm.go        # OperatorExists, OperatorPackageRequested, GetSubscription, etc.
 ```
 
 ## API Dependency Strategy

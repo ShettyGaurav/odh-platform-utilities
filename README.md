@@ -235,8 +235,14 @@ domain, err := openshift.GetDomain(ctx, client)
 import "github.com/opendatahub-io/odh-platform-utilities/pkg/cluster/olm"
 
 info, err := olm.OperatorExists(ctx, client, "rhods-operator")
-exists, err := olm.SubscriptionExists(ctx, client, "my-operator")
+requested, err := olm.OperatorPackageRequested(ctx, client, "my-operator") // Catalog package name
 ```
+
+`OperatorPackageRequested` matches the package in Subscription `spec.name` or
+ClusterExtension `spec.source.catalog.packageName`, regardless of resource name.
+It does not check installation success or readiness. Use it for cross-version
+dependency detection by package name. `SubscriptionExists` is deprecated: it
+checks Subscription resource names, not package names, and sees only OLMv0.
 
 All functions are stateless (no singletons, no `Init()`), accept
 `client.Reader` + `context.Context`, and use unstructured clients internally
