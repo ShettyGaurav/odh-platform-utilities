@@ -31,7 +31,8 @@ The package separates two conceptually distinct detection concerns:
 
 | Function | Package | Requires |
 |---|---|---|
-| `DetectPlatform` | `cluster` | OLM for auto-detection; none for explicit `platformType` |
+| `DetectPlatform` | `cluster` | OLMv0 + OLMv1 for auto-detection; none for explicit `platformType` |
+| `ClusterExtensionInstallsPackage` | `cluster` | OLMv1 |
 
 Platform variants: `OpenDataHub`, `SelfManagedRhoai`, `ManagedRhoai`, `XKS`.
 
@@ -53,6 +54,9 @@ detection API is a transitional necessity and fallback mechanism.
 | `GetSubscription` | `cluster/olm` | OLM |
 | `CatalogSourceExists` | `cluster/olm` | OLM |
 
+`OperatorPackageRequested` delegates OLMv1 ClusterExtension matching to
+`ClusterExtensionInstallsPackage` in the parent `cluster` package.
+
 ## Package Structure
 
 ```text
@@ -61,6 +65,7 @@ pkg/cluster/
 ├── detect.go      # DetectClusterType, DetectClusterInfo, IsFipsEnabled
 ├── crd.go         # CustomResourceDefinitionExists
 ├── platform.go    # DetectPlatform
+├── olm_v1.go      # OLMv1 helpers: ClusterCatalog, ClusterExtensionInstallsPackage
 ├── openshift/
 │   └── openshift.go  # GetVersion, IsSingleNodeCluster, GetAuthenticationMode, etc.
 └── olm/

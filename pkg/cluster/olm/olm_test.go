@@ -279,6 +279,13 @@ func TestOperatorPackageRequested(t *testing.T) { //nolint:funlen // Shared tabl
 			newSubscription("my-operator", "other-package"),
 			newClusterExtension("custom-extension", "my-operator"),
 		}, want: true},
+		testCase{
+			name:        "OLMv1/non-Catalog sourceType does not match",
+			packageName: "operator-package",
+			objects: []client.Object{
+				newClusterExtensionWithSourceType("custom-extension", "operator-package", "Bundle"),
+			},
+		},
 	)
 
 	for _, api := range []struct {
@@ -303,7 +310,7 @@ func TestOperatorPackageRequested(t *testing.T) { //nolint:funlen // Shared tabl
 			testCase{name: api.name + "/missing package field", packageName: "operator-package",
 				objects: []client.Object{missing}},
 			testCase{name: api.name + "/malformed package field", packageName: "operator-package",
-				objects: []client.Object{malformed}, wantErr: "read " + strings.Join(api.packagePath, ".")},
+				objects: []client.Object{malformed}, wantErr: strings.Join(api.packagePath, ".")},
 		)
 	}
 
@@ -441,12 +448,16 @@ func newSubscription(name, packageName string) *unstructured.Unstructured {
 }
 
 func newClusterExtension(name, packageName string) *unstructured.Unstructured {
+	return newClusterExtensionWithSourceType(name, packageName, "Catalog")
+}
+
+func newClusterExtensionWithSourceType(name, packageName, sourceType string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "olm.operatorframework.io/v1",
 			"kind":       "ClusterExtension",
 			"spec": map[string]any{"source": map[string]any{
-				"sourceType": "Catalog",
+				"sourceType": sourceType,
 				"catalog":    map[string]any{"packageName": packageName},
 			}},
 			"metadata": map[string]any{"name": name},

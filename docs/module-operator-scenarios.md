@@ -994,8 +994,8 @@ case cluster.XKS:                // non-OpenShift Kubernetes
 }
 ```
 
-Detection precedence: explicit env var → OLM auto-detection (CatalogSource /
-OperatorCondition) → fallback to `OpenDataHub`.
+Detection precedence: explicit env var → OLM auto-detection (CatalogSource or ClusterCatalog /
+OperatorCondition or ClusterExtension) → fallback to `OpenDataHub`.
 
 ### Handling OpenShift-Specific Resources
 

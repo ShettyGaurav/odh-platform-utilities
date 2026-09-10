@@ -32,8 +32,11 @@ var (
 //     [Platform] constant is returned immediately.
 //  2. Otherwise, OLM resources are probed to auto-detect:
 //     a. If an "addon-managed-odh-catalog" CatalogSource exists in
-//     operatorNamespace → [ManagedRhoai].
-//     b. If a "rhods-operator" OperatorCondition exists → [SelfManagedRhoai].
+//     operatorNamespace, or a cluster-scoped ClusterCatalog with that name
+//     exists (OLMv1) → [ManagedRhoai].
+//     b. If a "rhods-operator" OperatorCondition exists, or a ClusterExtension
+//     with spec.source.catalog.packageName "rhods-operator" exists (OLMv1)
+//     → [SelfManagedRhoai].
 //     c. Fallback → [OpenDataHub].
 //
 // The platformType parameter typically comes from the ODH_PLATFORM_TYPE
@@ -78,18 +81,22 @@ func detectManagedRhoai(ctx context.Context, cli client.Reader, operatorNamespac
 	cs.SetGroupVersionKind(platformCatalogSourceGVK)
 
 	err := cli.Get(ctx, client.ObjectKey{
-		Name:      "addon-managed-odh-catalog",
+		Name:      managedAddonCatalogName,
 		Namespace: operatorNamespace,
 	}, cs)
-	if err != nil {
-		if meta.IsNoMatchError(err) {
-			return false, nil
-		}
-
-		return false, client.IgnoreNotFound(err)
+	if err == nil {
+		return true, nil
 	}
 
-	return true, nil
+	if meta.IsNoMatchError(err) {
+		return clusterCatalogExists(ctx, cli, managedAddonCatalogName)
+	}
+
+	if client.IgnoreNotFound(err) != nil {
+		return false, err
+	}
+
+	return clusterCatalogExists(ctx, cli, managedAddonCatalogName)
 }
 
 func detectSelfManaged(ctx context.Context, cli client.Reader) (Platform, error) {
@@ -97,18 +104,33 @@ func detectSelfManaged(ctx context.Context, cli client.Reader) (Platform, error)
 	list.SetGroupVersionKind(platformOperatorConditionGVK)
 
 	err := cli.List(ctx, list)
-	if err != nil {
-		if meta.IsNoMatchError(err) {
-			return OpenDataHub, nil
+	switch {
+	case err == nil:
+		for _, item := range list.Items {
+			if strings.HasPrefix(item.GetName(), rhoaiOperatorPackage+".") {
+				return SelfManagedRhoai, nil
+			}
 		}
-
-		return OpenDataHub, client.IgnoreNotFound(err)
+	case meta.IsNoMatchError(err):
+		// OLMv0 CRD absent; try OLMv1 ClusterExtension below.
+	default:
+		ignErr := client.IgnoreNotFound(err)
+		if ignErr != nil {
+			return "", ignErr
+		}
 	}
 
-	for _, item := range list.Items {
-		if strings.HasPrefix(item.GetName(), "rhods-operator.") {
-			return SelfManagedRhoai, nil
-		}
+	found, err := ClusterExtensionInstallsPackage(ctx, cli, rhoaiOperatorPackage, "")
+	if meta.IsNoMatchError(err) {
+		return OpenDataHub, nil
+	}
+
+	if err != nil {
+		return "", err
+	}
+
+	if found {
+		return SelfManagedRhoai, nil
 	}
 
 	return OpenDataHub, nil
