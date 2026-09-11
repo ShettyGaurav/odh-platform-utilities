@@ -24,8 +24,8 @@ import (
 	"github.com/opendatahub-io/odh-platform-utilities/pkg/cluster"
 )
 
-// ErrOperatorNotInstalled is returned by [OperatorExists] when no
-// OperatorCondition matching the given prefix is found.
+// ErrOperatorNotInstalled is returned by [OperatorExists] when no installed
+// operator matching the given prefix is found on either OLMv0 or OLMv1.
 var ErrOperatorNotInstalled = errors.New("operator not installed")
 
 const operatorFrameworkGroup = "operators.coreos.com"
@@ -43,17 +43,49 @@ var (
 	}
 )
 
-// OperatorExists checks whether an OLM-managed operator whose
-// OperatorCondition name starts with operatorPrefix is installed on the
-// cluster.
+// OperatorExists checks whether an OLM-managed operator whose package name
+// matches operatorPrefix is installed on the cluster.
 //
-// If found, it returns an [cluster.OperatorInfo] with the version extracted from
-// the OperatorCondition name (format: "<prefix>.<version>"). If the
-// operator is not installed, it returns (nil, [ErrOperatorNotInstalled]).
+// OLMv0 detection lists OperatorCondition objects whose name starts with
+// "<prefix>.<version>". OLMv1 detection lists ClusterExtension objects whose
+// spec.source.catalog.packageName matches the prefix and whose Installed
+// condition is True with reason Succeeded.
 //
-// Requires OLM. When OLM is absent, returns an error satisfying
-// [meta.IsNoMatchError].
+// If found, it returns an [cluster.OperatorInfo] with the version extracted
+// from the OperatorCondition name or ClusterExtension status. If the operator
+// is not installed, it returns (nil, [ErrOperatorNotInstalled]).
+//
+// Requires OLM. When neither OLMv0 nor OLMv1 APIs are available, returns an
+// error satisfying [meta.IsNoMatchError].
 func OperatorExists(
+	ctx context.Context, cli client.Reader, operatorPrefix string,
+) (*cluster.OperatorInfo, error) {
+	info, v0Err := operatorExistsViaOperatorCondition(ctx, cli, operatorPrefix)
+	if info != nil {
+		return info, nil
+	}
+
+	if v0Err != nil && !meta.IsNoMatchError(v0Err) {
+		return nil, v0Err
+	}
+
+	info, v1Err := cluster.OperatorInstalledViaClusterExtension(ctx, cli, operatorPrefix)
+	if info != nil {
+		return info, nil
+	}
+
+	if v1Err != nil && !meta.IsNoMatchError(v1Err) {
+		return nil, v1Err
+	}
+
+	if meta.IsNoMatchError(v0Err) && meta.IsNoMatchError(v1Err) {
+		return nil, errors.Join(v0Err, v1Err)
+	}
+
+	return nil, ErrOperatorNotInstalled
+}
+
+func operatorExistsViaOperatorCondition(
 	ctx context.Context, cli client.Reader, operatorPrefix string,
 ) (*cluster.OperatorInfo, error) {
 	list := &unstructured.UnstructuredList{}
@@ -72,14 +104,11 @@ func OperatorExists(
 		}
 
 		version := strings.TrimPrefix(item.GetName(), expectedPrefix)
-		if version != "" && !strings.HasPrefix(version, "v") {
-			version = "v" + version
-		}
 
-		return &cluster.OperatorInfo{Version: version}, nil
+		return cluster.NewOperatorInfo(version), nil
 	}
 
-	return nil, ErrOperatorNotInstalled
+	return nil, nil //nolint:nilnil // Absent condition is not an error; OperatorExists falls through to OLMv1.
 }
 
 // SubscriptionExists checks for an OLMv0 Subscription with the given

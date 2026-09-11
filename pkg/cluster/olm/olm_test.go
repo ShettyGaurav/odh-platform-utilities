@@ -233,6 +233,60 @@ func TestOperatorExists(t *testing.T) { //nolint:funlen // Table-driven test wit
 			},
 			wantInfo: false,
 		},
+		{
+			name:   "OLMv1 installed extension found with version",
+			prefix: "rhods-operator",
+			objects: []client.Object{
+				newInstalledClusterExtension("rhoai-operator", "rhods-operator", "1.2.3"),
+			},
+			wantInfo: true,
+			wantVer:  "v1.2.3",
+		},
+		{
+			name:   "OLMv1 installed extension with v prefix version",
+			prefix: "rhods-operator",
+			objects: []client.Object{
+				newInstalledClusterExtension("rhoai-ext", "rhods-operator", "v2.0.0"),
+			},
+			wantInfo: true,
+			wantVer:  "v2.0.0",
+		},
+		{
+			name:   "OLMv0 miss and OLMv1 installed",
+			prefix: "rhods-operator",
+			objects: []client.Object{
+				newOperatorCondition("other-operator.v1.0.0"),
+				newInstalledClusterExtension("rhoai-ext", "rhods-operator", "1.2.3"),
+			},
+			wantInfo: true,
+			wantVer:  "v1.2.3",
+		},
+		{
+			name:   "OLMv0 hit wins when both present",
+			prefix: "rhods-operator",
+			objects: []client.Object{
+				newOperatorCondition("rhods-operator.v1.0.0"),
+				newInstalledClusterExtension("rhoai-ext", "rhods-operator", "2.0.0"),
+			},
+			wantInfo: true,
+			wantVer:  "v1.0.0",
+		},
+		{
+			name:   "ClusterExtension matches package but not installed",
+			prefix: "rhods-operator",
+			objects: []client.Object{
+				newClusterExtension("rhoai-ext", "rhods-operator"),
+			},
+			wantInfo: false,
+		},
+		{
+			name:   "non-Catalog ClusterExtension does not match",
+			prefix: "rhods-operator",
+			objects: []client.Object{
+				newInstalledClusterExtensionWithSourceType("rhoai-ext", "rhods-operator", "Bundle", "1.2.3"),
+			},
+			wantInfo: false,
+		},
 	}
 
 	for _, tc := range tests {
@@ -465,6 +519,33 @@ func newClusterExtensionWithSourceType(name, packageName, sourceType string) *un
 	}
 }
 
+//nolint:unparam // Table-driven tests reuse a common package name.
+func newInstalledClusterExtension(name, packageName, version string) *unstructured.Unstructured {
+	return newInstalledClusterExtensionWithSourceType(name, packageName, "Catalog", version)
+}
+
+func newInstalledClusterExtensionWithSourceType(
+	name, packageName, sourceType, version string,
+) *unstructured.Unstructured {
+	ext := newClusterExtensionWithSourceType(name, packageName, sourceType)
+	ext.Object["status"] = map[string]any{
+		"conditions": []any{
+			map[string]any{
+				"type":   "Installed",
+				"status": "True",
+				"reason": "Succeeded",
+			},
+		},
+		"install": map[string]any{
+			"bundle": map[string]any{
+				"version": version,
+			},
+		},
+	}
+
+	return ext
+}
+
 func newCatalogSource(name, namespace string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{
 		Object: map[string]any{
@@ -478,14 +559,95 @@ func newCatalogSource(name, namespace string) *unstructured.Unstructured {
 	}
 }
 
-func TestOperatorExists_APIError(t *testing.T) {
+func TestOperatorExists_APIErrors(t *testing.T) { //nolint:funlen // Error combinations are table-driven.
 	t.Parallel()
 
-	baseCli := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()
-	cli := &erroringOLMClient{Reader: baseCli, listErr: errAPIFailure}
+	operatorConditionGVK := schema.GroupVersionKind{
+		Group: "operators.coreos.com", Version: "v2", Kind: "OperatorCondition",
+	}
+	clusterExtensionGVK := schema.GroupVersionKind{
+		Group: "olm.operatorframework.io", Version: "v1", Kind: "ClusterExtension",
+	}
+	operatorConditionNoMatch := &meta.NoKindMatchError{
+		GroupKind: operatorConditionGVK.GroupKind(), SearchedVersions: []string{operatorConditionGVK.Version},
+	}
+	clusterExtensionNoMatch := &meta.NoKindMatchError{
+		GroupKind:        clusterExtensionGVK.GroupKind(),
+		SearchedVersions: []string{clusterExtensionGVK.Version},
+	}
 
-	_, err := olm.OperatorExists(t.Context(), cli, "rhods-operator")
-	require.ErrorIs(t, err, errAPIFailure)
+	tests := []struct {
+		name        string
+		prefix      string
+		wantErr     error
+		listErrs    map[schema.GroupVersionKind]error
+		objects     []client.Object
+		wantNoMatch bool
+	}{
+		{
+			name:   "OLMv0 API failure",
+			prefix: "rhods-operator",
+			listErrs: map[schema.GroupVersionKind]error{
+				operatorConditionGVK: errAPIFailure,
+			},
+			wantErr: errAPIFailure,
+		},
+		{
+			name:   "OLMv0 unavailable and OLMv1 installed",
+			prefix: "rhods-operator",
+			objects: []client.Object{
+				newInstalledClusterExtension("rhoai-ext", "rhods-operator", "1.2.3"),
+			},
+			listErrs: map[schema.GroupVersionKind]error{
+				operatorConditionGVK: operatorConditionNoMatch,
+			},
+		},
+		{
+			name:   "both OLM APIs unavailable",
+			prefix: "rhods-operator",
+			listErrs: map[schema.GroupVersionKind]error{
+				operatorConditionGVK: operatorConditionNoMatch,
+				clusterExtensionGVK:  clusterExtensionNoMatch,
+			},
+			wantNoMatch: true,
+		},
+		{
+			name:   "OLMv0 miss and OLMv1 API failure",
+			prefix: "rhods-operator",
+			listErrs: map[schema.GroupVersionKind]error{
+				clusterExtensionGVK: errClusterExtensionAPI,
+			},
+			wantErr: errClusterExtensionAPI,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			baseCli := fake.NewClientBuilder().
+				WithScheme(runtime.NewScheme()).
+				WithObjects(tc.objects...).
+				Build()
+			cli := &erroringOLMClient{
+				Reader:   baseCli,
+				listErrs: tc.listErrs,
+			}
+
+			info, err := olm.OperatorExists(t.Context(), cli, tc.prefix)
+			switch {
+			case tc.wantErr != nil:
+				require.ErrorIs(t, err, tc.wantErr)
+				assert.Nil(t, info)
+			case tc.wantNoMatch:
+				require.True(t, meta.IsNoMatchError(err))
+				assert.Nil(t, info)
+			default:
+				require.NoError(t, err)
+				require.NotNil(t, info)
+			}
+		})
+	}
 }
 
 func TestGetSubscription_APIError(t *testing.T) {

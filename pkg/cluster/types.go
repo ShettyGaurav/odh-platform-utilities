@@ -1,5 +1,7 @@
 package cluster
 
+import "strings"
+
 // Platform identifies the product distribution that is deploying the
 // controller. Module controllers use this to select manifest overlays,
 // branding text, namespace defaults, and other platform-specific behavior.
@@ -68,9 +70,24 @@ const (
 
 // OperatorInfo holds metadata about an installed OLM operator.
 type OperatorInfo struct {
-	// Version is the operator version extracted from the OperatorCondition
-	// name (e.g. "v1.2.3"). May be empty if the version suffix is absent.
+	// Version is the operator version extracted from the OLMv0 OperatorCondition
+	// name (e.g. "v1.2.3") or the OLMv1 ClusterExtension bundle version. May be
+	// empty if the version is absent.
 	Version string
+}
+
+// NewOperatorInfo returns OperatorInfo with a normalized version string.
+// Non-empty versions without a leading "v" prefix receive one.
+func NewOperatorInfo(version string) *OperatorInfo {
+	return &OperatorInfo{Version: normalizeOperatorVersion(version)}
+}
+
+func normalizeOperatorVersion(version string) string {
+	if version != "" && !strings.HasPrefix(version, "v") {
+		return "v" + version
+	}
+
+	return version
 }
 
 const (

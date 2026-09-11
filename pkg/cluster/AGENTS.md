@@ -48,7 +48,7 @@ detection API is a transitional necessity and fallback mechanism.
 | Function | Package | Requires |
 |---|---|---|
 | `CustomResourceDefinitionExists` | `cluster` | Any K8s |
-| `OperatorExists` | `cluster/olm` | OLM |
+| `OperatorExists` | `cluster/olm` | OLMv0 or OLMv1 |
 | `SubscriptionExists` (deprecated) | `cluster/olm` | OLMv0 |
 | `OperatorPackageRequested` | `cluster/olm` | OLMv0 or OLMv1 |
 | `GetSubscription` | `cluster/olm` | OLM |
@@ -56,6 +56,8 @@ detection API is a transitional necessity and fallback mechanism.
 
 `OperatorPackageRequested` delegates OLMv1 ClusterExtension matching to
 `ClusterExtensionInstallsPackage` in the parent `cluster` package.
+`OperatorExists` delegates OLMv1 installed-operator detection to
+`OperatorInstalledViaClusterExtension` in the parent `cluster` package.
 
 ## Package Structure
 
@@ -65,7 +67,7 @@ pkg/cluster/
 ├── detect.go      # DetectClusterType, DetectClusterInfo, IsFipsEnabled
 ├── crd.go         # CustomResourceDefinitionExists
 ├── platform.go    # DetectPlatform
-├── olm_v1.go      # OLMv1 helpers: ClusterCatalog, ClusterExtensionInstallsPackage
+├── olm_v1.go      # OLMv1 helpers: ClusterCatalog, ClusterExtensionInstallsPackage, OperatorInstalledViaClusterExtension
 ├── openshift/
 │   └── openshift.go  # GetVersion, IsSingleNodeCluster, GetAuthenticationMode, etc.
 └── olm/
